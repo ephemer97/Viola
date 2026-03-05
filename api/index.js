@@ -6402,7 +6402,7 @@ async function handleStream(type, id, config, workerOrigin) {
         // ⛩️ STREAMVIX: Launch fetch in parallel NOW (don't block torrent search)
         // We'll await the result later, after all torrent streams are built
         let streamVixPromise = null;
-        if (decodedId.startsWith('kitsu:')) {
+        if (decodedId.startsWith('kitsu:') && config.anime_enabled) {
             const streamVixUrl = `https://streamvix.hayd.uk/stream/${type}/${decodedId}.json`;
             console.log(`⛩️ [StreamVix] Launching parallel fetch: ${streamVixUrl}`);
             streamVixPromise = fetch(streamVixUrl, {
