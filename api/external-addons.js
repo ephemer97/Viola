@@ -35,6 +35,12 @@ const EXTERNAL_ADDONS = {
         name: 'Comet',
         emoji: '🅒',
         timeout: 1500
+    },
+    stremthru_torz: {
+        baseUrl: process.env.STREMTHRU_TORZ_URL || 'https://stremthru.13377001.xyz/stremio/torz/eyJpbmRleGVycyI6bnVsbCwic3RvcmVzIjpbeyJjIjoicDJwIiwidCI6IiJ9XSwiZmlsdGVyIjoiXCJpdFwiIGluIExhbmd1YWdlcyBcdTAwMjZcdTAwMjYgUXVhbGl0eSAhPSBcIkNBTVwiIn0=',
+        name: 'StremThru Torz',
+        emoji: '🆂',
+        timeout: 2000
     }
 };
 
@@ -129,6 +135,10 @@ function extractOriginalProvider(text) {
     const cometMatch = text.match(/🔎\s*([^\n]+)/);
     if (cometMatch) return cometMatch[1].trim();
 
+    // StremThru: 🔎 o 🔍 in base al formato
+    const stremthruMatch = text.match(/[🔍🔎]\s*([^\n]+)/);
+    if (stremthruMatch && text.includes('StremThru')) return stremthruMatch[1].trim();
+
     return null;
 }
 
@@ -167,11 +177,11 @@ function normalizeMediaFusionProvider(provider) {
  */
 function extractPackTitle(stream) {
     const text = stream.title || stream.description || '';
-    
+
     // 1. Prima prova 📁 nel testo (più affidabile)
     const match = text.match(/📁\s*([^\n]+)/);
     if (match) return match[1].trim();
-    
+
     // 2. Poi prova behaviorHints.folderName - MA ignora se è un filename!
     // Comet a volte passa il nome del FILE come folderName (bug di Comet)
     const folderName = stream.behaviorHints?.folderName;
@@ -183,7 +193,7 @@ function extractPackTitle(stream) {
         }
         // Se è un filename, ignoriamo e torniamo null (useremo filename invece)
     }
-    
+
     return null;
 }
 
