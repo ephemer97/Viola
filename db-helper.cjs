@@ -19,6 +19,42 @@ const PROVIDER_PRIORITY_MAP = {
 };
 const PROVIDER_PRIORITY_DEFAULT = 10;
 
+const BLOCKED_FILENAME_EXTENSIONS = ['.exe'];
+
+function getLeafName(value) {
+  if (typeof value !== 'string') return '';
+  return value.trim().split('/').pop().split('\\').pop().trim();
+}
+
+function hasBlockedFilenameExtension(value) {
+  const leaf = getLeafName(value).toLowerCase();
+  return BLOCKED_FILENAME_EXTENSIONS.some(ext => leaf.endsWith(ext));
+}
+
+function getBlockedTorrentField(torrent = {}) {
+  if (hasBlockedFilenameExtension(torrent.file_title)) {
+    return { field: 'file_title', value: getLeafName(torrent.file_title) };
+  }
+
+  if (hasBlockedFilenameExtension(torrent.file_path)) {
+    return { field: 'file_path', value: getLeafName(torrent.file_path) };
+  }
+
+  if (hasBlockedFilenameExtension(torrent.title)) {
+    return { field: 'title', value: getLeafName(torrent.title) };
+  }
+
+  return null;
+}
+
+function logBlockedDbSave(context, details = {}) {
+  const hash = details.infoHash || details.info_hash || details.hash || 'unknown';
+  const provider = details.provider || 'unknown';
+  const blockedField = getBlockedTorrentField(details);
+  const blockedValue = blockedField?.value || getLeafName(details.filePath || details.file_title || details.title || '');
+  console.warn(`⛔ [DB] Skipping ${context} for ${String(hash).substring(0, 8)}... (${provider}) because ${blockedField?.field || 'filename'} ends with a blocked extension: ${blockedValue}`);
+}
+
 /**
  * Get priority number for a provider string.
  * Lower = better. Used in JS code (insertTorrent, dedup, etc.)
@@ -293,6 +329,11 @@ async function searchEpisodeFiles(imdbId, season, episode, providers = null) {
 async function insertTorrent(torrent) {
   if (!pool) throw new Error('Database not initialized');
 
+  if (getBlockedTorrentField(torrent)) {
+    logBlockedDbSave('insertTorrent', torrent);
+    return false;
+  }
+
   const client = await pool.connect();
 
   try {
@@ -407,6 +448,12 @@ async function updateRdCacheStatus(cacheResults, mediaType = null) {
       const hashLower = result.hash.toLowerCase();
       const cachedValue = result.cached === true ? true : (result.cached === false ? false : true);
 
+      if (getBlockedTorrentField(result)) {
+        logBlockedDbSave('updateRdCacheStatus', result);
+        skipped++;
+        continue;
+      }
+
       // Skip uncached items not in DB
       if (!existingHashes.has(hashLower) && cachedValue === false) {
         skipped++;
@@ -499,6 +546,12 @@ async function updateTbCacheStatus(cacheResults, mediaType = null) {
       if (!result.hash) continue;
       const hashLower = result.hash.toLowerCase();
       const cachedValue = result.cached === true ? true : (result.cached === false ? false : true);
+
+      if (getBlockedTorrentField(result)) {
+        logBlockedDbSave('updateTbCacheStatus', result);
+        skipped++;
+        continue;
+      }
 
       if (!existingHashes.has(hashLower) && cachedValue === false) {
         skipped++;
@@ -738,6 +791,11 @@ async function batchInsertTorrents(torrents) {
 
     for (const torrent of torrents) {
       try {
+        if (getBlockedTorrentField(torrent)) {
+          logBlockedDbSave('batchInsertTorrents', torrent);
+          continue;
+        }
+
         const query = `
           INSERT INTO torrents (
             info_hash, provider, title, size, type, upload_date,
@@ -830,6 +888,11 @@ async function updateTorrentFileInfo(infoHash, fileIndex, filePath, fileSize = n
     // Extract just the filename from path
     const fileName = filePath.split('/').pop().split('\\').pop();
     if (DEBUG_MODE) console.log(`💾 [DB updateTorrentFileInfo] Extracted filename: ${fileName}`);
+
+    if (hasBlockedFilenameExtension(fileName)) {
+      logBlockedDbSave('updateTorrentFileInfo', { infoHash, filePath });
+      return false;
+    }
 
     // If episodeInfo is provided, save to 'files' table (for series episodes)
     if (episodeInfo && episodeInfo.imdbId && episodeInfo.season && episodeInfo.episode) {
@@ -1611,11 +1674,22 @@ async function insertPackFiles(packFiles) {
   if (!packFiles || packFiles.length === 0) return 0;
 
   try {
+    const safePackFiles = [];
+    for (const pf of packFiles) {
+      if (getBlockedTorrentField(pf)) {
+        logBlockedDbSave('insertPackFiles', pf);
+        continue;
+      }
+      safePackFiles.push(pf);
+    }
+
+    if (safePackFiles.length === 0) return 0;
+
     const values = [];
     const params = [];
     let paramIndex = 1;
 
-    packFiles.forEach(pf => {
+    safePackFiles.forEach(pf => {
       values.push(`($${paramIndex}, $${paramIndex + 1}, $${paramIndex + 2}, $${paramIndex + 3}, $${paramIndex + 4})`);
       params.push(pf.pack_hash, pf.imdb_id, pf.file_index, pf.file_path, pf.file_size);
       paramIndex += 5;
@@ -1698,15 +1772,26 @@ async function insertEpisodeFiles(episodeFiles) {
   if (!episodeFiles || episodeFiles.length === 0) return 0;
 
   try {
+    const safeEpisodeFiles = [];
+    for (const file of episodeFiles) {
+      if (getBlockedTorrentField(file)) {
+        logBlockedDbSave('insertEpisodeFiles', file);
+        continue;
+      }
+      safeEpisodeFiles.push(file);
+    }
+
+    if (safeEpisodeFiles.length === 0) return 0;
+
     // ✅ SKIP CHECK: if files already exist for this hash with same count, skip entirely
     // Torrent file lists are immutable (defined by info_hash), so count match = all files present
-    const infoHash = episodeFiles[0].info_hash.toLowerCase();
+    const infoHash = safeEpisodeFiles[0].info_hash.toLowerCase();
     const countResult = await pool.query(
       'SELECT COUNT(*)::int AS cnt FROM files WHERE info_hash = $1',
       [infoHash]
     );
     const existingCount = countResult.rows[0]?.cnt || 0;
-    if (existingCount === episodeFiles.length) {
+    if (existingCount === safeEpisodeFiles.length) {
       if (DEBUG_MODE) console.log(`⏩ [DB] Skip insertEpisodeFiles for ${infoHash.substring(0,8)}… — ${existingCount} files already in DB`);
       return 0; // nothing to do
     }
@@ -1715,8 +1800,8 @@ async function insertEpisodeFiles(episodeFiles) {
     const BATCH_SIZE = 100; // PostgreSQL parameter limit safety
     let totalInserted = 0;
 
-    for (let batchStart = 0; batchStart < episodeFiles.length; batchStart += BATCH_SIZE) {
-      const batch = episodeFiles.slice(batchStart, batchStart + BATCH_SIZE);
+    for (let batchStart = 0; batchStart < safeEpisodeFiles.length; batchStart += BATCH_SIZE) {
+      const batch = safeEpisodeFiles.slice(batchStart, batchStart + BATCH_SIZE);
       const values = [];
       const params = [];
       let paramIndex = 1;
@@ -1768,7 +1853,7 @@ async function insertEpisodeFiles(episodeFiles) {
       }
     }
 
-    if (DEBUG_MODE) console.log(`✅ [DB] Inserted ${totalInserted}/${episodeFiles.length} episode files`);
+    if (DEBUG_MODE) console.log(`✅ [DB] Inserted ${totalInserted}/${safeEpisodeFiles.length} episode files`);
     return totalInserted;
 
   } catch (error) {
